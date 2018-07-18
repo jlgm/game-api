@@ -7,16 +7,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"upper.io/db.v3/lib/sqlbuilder"
-	"upper.io/db.v3/postgresql"
 )
 
-var settings = postgresql.ConnectionURL{
-	Host:     "postgres",
-	Database: "game",
-	User:     "postgres",
-	Password: "",
-}
+var dal *Dal
 
 type Player struct {
 	ID          uuid.UUID `db:"id,omitempty" json:"id,omitempty"`
@@ -36,13 +29,13 @@ type FriendsRequest struct {
 }
 
 func CreateUser(w http.ResponseWriter, r *http.Request) {
-	sess, _ := postgresql.Open(settings)
-	defer sess.Close()
-	players := sess.Collection("player")
+
+	dal, _ := dal.GetSession()
 
 	var player Player
 	err := json.NewDecoder(r.Body).Decode(&player)
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -52,45 +45,47 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 		Name: player.Name,
 	}
 
-	_, _ = players.Insert(newPlayer)
-
+	err = dal.InsertPlayer(newPlayer)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	log.Print("user created")
 	json.NewEncoder(w).Encode(newPlayer)
 }
 
 func SaveState(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
 	id := params["id"]
-	sess, _ := postgresql.Open(settings)
 
-	defer sess.Close()
+	dal, _ := dal.GetSession()
 
 	var player Player
 	err := json.NewDecoder(r.Body).Decode(&player)
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	q := sess.Update("player").Set(
-		"score", player.Score,
-		"games", player.GamesPlayed,
-	).Where("id = ?", id)
-
-	_, err = q.Exec()
+	err = dal.UpdateState(player.Score, player.GamesPlayed, id)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	log.Print("State updated")
 }
 
 func GetState(w http.ResponseWriter, r *http.Request) {
 
 	params := mux.Vars(r)
 	id := params["id"]
-	sess, _ := postgresql.Open(settings)
 
-	defer sess.Close()
-	players := sess.Collection("player")
+	dal, _ := dal.GetSession()
+
 	var player Player
+	err := dal.GetState(&player, id)
 
-	res := players.Find("id", id)
-	err := res.One(&player)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -106,71 +101,51 @@ func GetFriends(w http.ResponseWriter, r *http.Request) {
 
 	params := mux.Vars(r)
 	id := params["id"]
-	sess, _ := postgresql.Open(settings)
+	dal, _ := dal.GetSession()
 
-	defer sess.Close()
-
-	res, err := sess.Query(`SELECT * FROM player WHERE ID IN (
-			SELECT player1 FROM friendship WHERE player2 = ?
-			UNION
-			SELECT player2 FROM friendship WHERE player1 = ?
-		)`, id, id)
+	friends, err := dal.GetFriends(id)
 
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	var friends []Friend
-	iter := sqlbuilder.NewIterator(res)
-	iter.All(&friends)
-
 	payload := map[string]interface{}{
 		"friends": friends,
 	}
+	log.Print("Friendlist retrieved with success")
 	json.NewEncoder(w).Encode(payload)
 }
 
 func AddFriends(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
 	id := params["id"]
-	sess, _ := postgresql.Open(settings)
-
-	defer sess.Close()
+	dal, _ := dal.GetSession()
 
 	var friends FriendsRequest
 	err := json.NewDecoder(r.Body).Decode(&friends)
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	_, err = sess.Exec(`DELETE FROM friendship WHERE player1 = ? OR player2 = ?`, id, id)
+	err = dal.UpdateFriends(id, friends)
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	for _, friend := range *friends.IDs {
-		// No bulk operations in this lib. Found it too late
-		q := sess.InsertInto("friendship").Columns("player1", "player2").Values(id, friend)
-		_, err = q.Exec()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-	}
-
+	log.Print("friends updated with success")
 }
 
 func GetAll(w http.ResponseWriter, r *http.Request) {
-	var users []Player
-	sess, _ := postgresql.Open(settings)
-	defer sess.Close()
+	dal, _ := dal.GetSession()
 
-	players := sess.Collection("player")
-	res := players.Find()
-	err := res.All(&users)
+	users, err := dal.FindAll()
 	if err != nil {
+		log.Print(err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -178,11 +153,15 @@ func GetAll(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]interface{}{
 		"users": users,
 	}
+	log.Print("All users retrieved with success")
 	json.NewEncoder(w).Encode(payload)
 }
 
 // our main function
 func main() {
+
+	dal = &Dal{}
+	defer dal.CloseSession()
 
 	router := mux.NewRouter()
 	router.HandleFunc("/user", CreateUser).Methods("POST")
