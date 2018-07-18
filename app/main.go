@@ -12,7 +12,7 @@ import (
 )
 
 var settings = postgresql.ConnectionURL{
-	Host:     "172.17.0.2",
+	Host:     "postgres",
 	Database: "game",
 	User:     "postgres",
 	Password: "",
